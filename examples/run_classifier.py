@@ -64,11 +64,12 @@ class InputExample(object):
 class InputFeatures(object):
     """A single set of features of data."""
 
-    def __init__(self, input_ids, input_mask, segment_ids, label_id):
+    def __init__(self, input_ids, input_mask, segment_ids, label_id, guid=-1):
         self.input_ids = input_ids
         self.input_mask = input_mask
         self.segment_ids = segment_ids
         self.label_id = label_id
+        self.guid = guid
 
 
 class DataProcessor(object):
@@ -200,7 +201,7 @@ class WSDMFakeNewsProcessor(DataProcessor):
             if i == 0:
                 continue
             try:
-                guid = "%s-%s" % (set_type, convert_to_unicode(line[0]))
+                guid = "%s" % (convert_to_unicode(line[0]))
                 text_a = convert_to_unicode(line[3])
                 text_b = convert_to_unicode(line[4])
                 label = convert_to_unicode(line[-1])
@@ -338,7 +339,8 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
                 InputFeatures(input_ids=input_ids,
                               input_mask=input_mask,
                               segment_ids=segment_ids,
-                              label_id=label_id))
+                              label_id=label_id,
+                              guid=example.guid))
     return features
 
 
@@ -595,11 +597,12 @@ def main():
         logger.info("  Num examples = %d", len(train_examples))
         logger.info("  Batch size = %d", args.train_batch_size)
         logger.info("  Num steps = %d", num_train_steps)
+        all_guids = torch.tensor([ int(f.guid) for f in train_features], dtype=torch.long)
         all_input_ids = torch.tensor([f.input_ids for f in train_features], dtype=torch.long)
         all_input_mask = torch.tensor([f.input_mask for f in train_features], dtype=torch.long)
         all_segment_ids = torch.tensor([f.segment_ids for f in train_features], dtype=torch.long)
         all_label_ids = torch.tensor([f.label_id for f in train_features], dtype=torch.long)
-        train_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
+        train_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids, all_guids)
         if args.local_rank == -1:
             train_sampler = RandomSampler(train_data)
         else:
@@ -613,7 +616,7 @@ def main():
             nb_tr_examples, nb_tr_steps = 0, 0
             for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
                 batch = tuple(t.to(device) for t in batch)
-                input_ids, input_mask, segment_ids, label_ids = batch
+                input_ids, input_mask, segment_ids, label_ids, guids = batch
                 loss, _ = model(input_ids, segment_ids, input_mask, label_ids)
                 if n_gpu > 1:
                     loss = loss.mean() # mean() to average on multi-gpu.
@@ -649,6 +652,7 @@ def main():
                     metadata['global_step'] = global_step,
                     metadata['tr_loss'] = tr_loss
                     metadata['global_nb_tr_steps'] = global_nb_tr_steps
+                    metadata['nb_tr_steps'] = nb_tr_steps
                     if nb_tr_steps % args.eval_every == 0 :
                         evaluate(args, model, processor, tokenizer, metadata, device)
 
@@ -667,11 +671,12 @@ def evaluate(args, model, processor, tokenizer, metadata, device):
     logger.info("***** Running evaluation *****")
     logger.info("  Num examples = %d", len(eval_examples))
     logger.info("  Batch size = %d", args.eval_batch_size)
+    all_guids = torch.tensor([ int(f.guid) for f in eval_features], dtype=torch.long)
     all_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
     all_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
     all_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
     all_label_ids = torch.tensor([f.label_id for f in eval_features], dtype=torch.long)
-    eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
+    eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids, all_guids)
     if args.local_rank == -1:
         eval_sampler = SequentialSampler(eval_data)
     else:
@@ -686,7 +691,7 @@ def evaluate(args, model, processor, tokenizer, metadata, device):
                               "eval_predictions_{0}.txt".format(str(global_nb_tr_steps)))
     output_predictions_file = open(output_predictions_path,"w")
     output_predictions_file.write("Id,Category\n")
-    for input_ids, input_mask, segment_ids, label_ids in eval_dataloader:
+    for input_ids, input_mask, segment_ids, label_ids, guids in eval_dataloader:
         input_ids = input_ids.to(device)
         input_mask = input_mask.to(device)
         segment_ids = segment_ids.to(device)
@@ -699,8 +704,8 @@ def evaluate(args, model, processor, tokenizer, metadata, device):
         label_ids = label_ids.to('cpu').numpy()
         tmp_eval_accuracy = accuracy(logits, label_ids, custom = args.metric)
 
-        for idx, input_id in enumerate(input_ids):
-            text = ",".join([str(input_id), id2label[label_ids[idx]]]) + "\n"
+        for idx, _ in enumerate(input_ids):
+            text = ",".join([str(instance_id), id2label[label_ids[idx]]]) + "\n"
             output_predictions_file.write(text)
 
         eval_loss += tmp_eval_loss.mean().item()
@@ -718,7 +723,7 @@ def evaluate(args, model, processor, tokenizer, metadata, device):
               'loss': metadata['tr_loss'] / metadata['global_nb_tr_steps']}
 
 
-    output_eval_file = os.path.join(args.output_dir, "eval_results_{0}.txt".format(str(nb_tr_steps)))
+    output_eval_file = os.path.join(args.output_dir, "eval_results_{0}.txt".format(str(global_nb_tr_steps)))
     with open(output_eval_file, "w") as writer:
         logger.info("***** Eval results *****")
         for key in sorted(result.keys()):
