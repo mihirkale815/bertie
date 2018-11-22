@@ -705,7 +705,7 @@ def evaluate(args, model, processor, tokenizer, metadata, device):
         tmp_eval_accuracy = accuracy(logits, label_ids, custom = args.metric)
 
         for idx, _ in enumerate(input_ids):
-            text = ",".join([str(instance_id), id2label[label_ids[idx]]]) + "\n"
+            text = ",".join([str(guids[idx]), id2label[label_ids[idx]]]) + "\n"
             output_predictions_file.write(text)
 
         eval_loss += tmp_eval_loss.mean().item()
