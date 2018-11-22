@@ -31,7 +31,8 @@ from torch.utils.data import TensorDataset, DataLoader, RandomSampler, Sequentia
 from torch.utils.data.distributed import DistributedSampler
 
 from pytorch_pretrained_bert.tokenization import printable_text, convert_to_unicode, BertTokenizer
-from pytorch_pretrained_bert.modeling import BertForSequenceClassification
+from pytorch_pretrained_bert.modeling import BertForSequenceClassification, \
+     BertForSequenceClassificationWithPooledWordEmbeddings
 from pytorch_pretrained_bert.optimization import BertAdam
 
 logging.basicConfig(format = '%(asctime)s - %(levelname)s - %(name)s -   %(message)s', 
@@ -453,6 +454,10 @@ def main():
                         default=None,
                         type=str,
                         help="Saved model path")
+    parser.add_argument("--model_architecture",
+                        default="basic",
+                        type=str,
+                        help="What model architecture to use on top of BERT")
 
     ## Other parameters
     parser.add_argument("--max_seq_length",
@@ -478,7 +483,7 @@ def main():
                         type=int,
                         help="Total batch size for training.")
     parser.add_argument("--eval_batch_size",
-                        default=32,
+                        default=64,
                         type=int,
                         help="Total batch size for eval.")
     parser.add_argument("--eval_every",
@@ -586,7 +591,14 @@ def main():
             len(train_examples) / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
 
     # Prepare model
-    model = BertForSequenceClassification.from_pretrained(args.bert_model, len(label_list))
+    if args.model_architecture=="basic":
+        model = BertForSequenceClassification.from_pretrained(args.bert_model, len(label_list))
+    elif args.model_architecture=="wordpooling":
+        model = BertForSequenceClassificationWithPooledWordEmbeddings.from_pretrained(
+                                                             args.bert_model, len(label_list))
+    else:
+        raise NotImplementedError
+
     if args.fp16:
         model.half()
     model.to(device)
