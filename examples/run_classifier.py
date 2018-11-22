@@ -354,9 +354,21 @@ def _truncate_seq_pair(tokens_a, tokens_b, max_length):
         else:
             tokens_b.pop()
 
-def accuracy(out, labels):
+def accuracy(out, labels, custom = None):
+    if custom is not None and custom =='wsdm':
+        return wsdm_custom_metric(out, labels)
     outputs = np.argmax(out, axis=1)
     return np.sum(outputs == labels)
+
+def wsdm_custom_metric(out, labels):
+    outputs = np.argmax(out, axis=1)
+    weights = np.ones_like(labels)
+    weights[labels==0] = 1./16
+    weights[labels==1] = 1./15
+    weights[labels==2] = 1./5
+    weights = weights/np.sum(weights)
+    weighted_acc = (outputs == labels)*weights
+    return np.sum(weighted_acc)*len(labels)
 
 def copy_optimizer_params_to_model(named_params_model, named_params_optimizer):
     """ Utility function for optimize_on_cpu and 16-bits training.
@@ -473,6 +485,10 @@ def main():
     parser.add_argument('--loss_scale',
                         type=float, default=128,
                         help='Loss scaling, positive power of 2 values can improve fp16 convergence.')
+    parser.add_argument("--metric",
+                        default=None,
+                        type=str,
+                        help="Which metric to use.")
 
     args = parser.parse_args()
 
@@ -652,7 +668,7 @@ def main():
 
             logits = logits.detach().cpu().numpy()
             label_ids = label_ids.to('cpu').numpy()
-            tmp_eval_accuracy = accuracy(logits, label_ids)
+            tmp_eval_accuracy = accuracy(logits, label_ids, custom = args.metric)
 
             eval_loss += tmp_eval_loss.mean().item()
             eval_accuracy += tmp_eval_accuracy
