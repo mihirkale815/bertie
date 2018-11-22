@@ -96,6 +96,16 @@ class DataProcessor(object):
                 lines.append(line)
             return lines
 
+    @classmethod
+    def _read_csv(cls, input_file, quotechar=None):
+        """Reads a comma separated value file."""
+        with open(input_file, "r") as f:
+            reader = csv.reader(f, delimiter=",", quotechar='"')
+            lines = []
+            for line in reader:
+                lines.append(line)
+            return lines
+
 
 class MrpcProcessor(DataProcessor):
     """Processor for the MRPC data set (GLUE version)."""
@@ -160,6 +170,46 @@ class MnliProcessor(DataProcessor):
             label = convert_to_unicode(line[-1])
             examples.append(
                 InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label))
+        return examples
+
+
+class WSDMFakeNewsProcessor(DataProcessor):
+    """Processor for the WSDM 2019 Fake News Challenge data set (GLUE version)."""
+
+    def get_train_examples(self, data_dir):
+        """See base class."""
+        return self._create_examples(
+            self._read_csv(os.path.join(data_dir, "train.csv")), 'train')
+
+    def get_dev_examples(self, data_dir):
+        """See base class."""
+        return self._create_examples(
+            self._read_csv(os.path.join(data_dir, "dev.csv")),
+            "dev")
+
+    def get_labels(self):
+        """See base class."""
+        return ["unrelated", "agreed", "disagreed"]
+
+    def _create_examples(self, lines, set_type):
+        """Creates examples for the training and dev sets."""
+        num_exceptions = 0
+        examples = []
+        allowed_labels = set(self.get_labels())
+        for (i, line) in enumerate(lines):
+            if i == 0:
+                continue
+            try:
+                guid = "%s-%s" % (set_type, convert_to_unicode(line[0]))
+                text_a = convert_to_unicode(line[3])
+                text_b = convert_to_unicode(line[4])
+                label = convert_to_unicode(line[-1])
+                if label not in allowed_labels: print(label)
+            except Exception as e:
+                num_exceptions+=1
+            examples.append(
+                InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label))
+        print("number of exceptions while parsing file = ",num_exceptions)
         return examples
 
 
@@ -430,6 +480,7 @@ def main():
         "cola": ColaProcessor,
         "mnli": MnliProcessor,
         "mrpc": MrpcProcessor,
+        "wsdm": WSDMFakeNewsProcessor
     }
 
     if args.local_rank == -1 or args.no_cuda:
