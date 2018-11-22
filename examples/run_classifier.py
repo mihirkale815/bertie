@@ -182,8 +182,12 @@ class WSDMFakeNewsProcessor(DataProcessor):
         return self._create_examples(
             self._read_csv(os.path.join(data_dir, "train.csv")), 'train')
 
-    def get_dev_examples(self, data_dir):
+    def get_dev_examples(self, data_dir, mode = "eval"):
         """See base class."""
+        if mode=="test":
+            return self._test_create_examples(
+            self._read_csv(os.path.join(data_dir, "test.csv")),
+            "test")
         return self._create_examples(
             self._read_csv(os.path.join(data_dir, "dev.csv")),
             "dev")
@@ -210,6 +214,24 @@ class WSDMFakeNewsProcessor(DataProcessor):
                 num_exceptions+=1
             examples.append(
                 InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label))
+        print("number of exceptions while parsing file = ",num_exceptions)
+        return examples
+
+    def _test_create_examples(self, lines, set_type):
+        """Creates examples for the training and dev sets."""
+        num_exceptions = 0
+        examples = []
+        for (i, line) in enumerate(lines):
+            if i == 0:
+                continue
+            try:
+                guid = "%s" % (convert_to_unicode(line[0]))
+                text_a = convert_to_unicode(line[3])
+                text_b = convert_to_unicode(line[4])
+            except Exception as e:
+                num_exceptions+=1
+            examples.append(
+                InputExample(guid=guid, text_a=text_a, text_b=text_b, label="unrelated"))
         print("number of exceptions while parsing file = ",num_exceptions)
         return examples
 
@@ -364,7 +386,7 @@ def accuracy(out, labels, custom = None):
     if custom is not None and custom =='wsdm':
         return wsdm_custom_metric(out, labels)
     outputs = np.argmax(out, axis=1)
-    return np.sum(outputs == labels)
+    return np.sum(outputs == labels) , outputs
 
 def wsdm_custom_metric(out, labels):
     outputs = np.argmax(out, axis=1)
@@ -374,7 +396,7 @@ def wsdm_custom_metric(out, labels):
     weights[labels==2] = 1./5
     weights = weights/np.sum(weights)
     weighted_acc = (outputs == labels)*weights
-    return np.sum(weighted_acc)*len(labels)
+    return np.sum(weighted_acc)*len(labels), outputs
 
 def copy_optimizer_params_to_model(named_params_model, named_params_optimizer):
     """ Utility function for optimize_on_cpu and 16-bits training.
@@ -427,6 +449,10 @@ def main():
                         type=str,
                         required=True,
                         help="The output directory where the model checkpoints will be written.")
+    parser.add_argument("--saved_model_path",
+                        default=None,
+                        type=str,
+                        help="Saved model path")
 
     ## Other parameters
     parser.add_argument("--max_seq_length",
@@ -443,6 +469,10 @@ def main():
                         default=False,
                         action='store_true',
                         help="Whether to run eval on the dev set.")
+    parser.add_argument("--do_test",
+                        default=False,
+                        action='store_true',
+                        help="Whether to run eval on the test set.")
     parser.add_argument("--train_batch_size",
                         default=32,
                         type=int,
@@ -534,10 +564,7 @@ def main():
     if n_gpu > 0:
         torch.cuda.manual_seed_all(args.seed)
 
-    if not args.do_train and not args.do_eval:
-        raise ValueError("At least one of `do_train` or `do_eval` must be True.")
-
-    if os.path.exists(args.output_dir) and os.listdir(args.output_dir):
+    if args.do_train and os.path.exists(args.output_dir) and os.listdir(args.output_dir):
         raise ValueError("Output directory ({}) already exists and is not empty.".format(args.output_dir))
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -655,17 +682,33 @@ def main():
                     metadata['nb_tr_steps'] = nb_tr_steps
                     if nb_tr_steps % args.eval_every == 0 :
                         evaluate(args, model, processor, tokenizer, metadata, device)
+                        evaluate(args, model, processor, tokenizer, metadata, device, 
+                                 mode = "test")
 
 
-    if args.do_eval:
-        evaluate(args, model, processor, tokenizer,metadata,device)
+    if not args.do_train and args.do_eval:
+        model = torch.load(args.saved_model_path)
+        evaluate(args, model, processor, tokenizer, metadata, device)
+
+    if not args.do_train and args.do_test:
+        model = torch.load(args.saved_model_path)
+        evaluate(args, model, processor, tokenizer, metadata, device, 
+                 mode = "test")
 
 
-def evaluate(args, model, processor, tokenizer, metadata, device):
+def evaluate(args, model, processor, tokenizer, metadata, device, mode = "eval"):
+
+    global_nb_tr_steps = metadata.get('global_nb_tr_steps',0)
+    output_predictions_path = os.path.join(args.output_dir, 
+                              "{0}_predictions_{1}.txt".format(mode,str(global_nb_tr_steps)))
+    output_eval_file = os.path.join(args.output_dir, 
+                              "{0}_results_{1}.txt".format(mode,str(global_nb_tr_steps)))
+    save_path = os.path.join(args.output_dir,"model_{0}".format(str(global_nb_tr_steps)))
+
     label_list = processor.get_labels()
     label_map = create_label_map(label_list)
     id2label = {idx: label for label, idx in label_map.items()}
-    eval_examples = processor.get_dev_examples(args.data_dir)
+    eval_examples = processor.get_dev_examples(args.data_dir, mode=mode)
     eval_features = convert_examples_to_features(
         eval_examples, label_list, args.max_seq_length, tokenizer)
     logger.info("***** Running evaluation *****")
@@ -686,9 +729,6 @@ def evaluate(args, model, processor, tokenizer, metadata, device):
     model.eval()
     eval_loss, eval_accuracy = 0, 0
     nb_eval_steps, nb_eval_examples = 0, 0
-    global_nb_tr_steps = metadata['global_nb_tr_steps']
-    output_predictions_path = os.path.join(args.output_dir, 
-                              "eval_predictions_{0}.txt".format(str(global_nb_tr_steps)))
     output_predictions_file = open(output_predictions_path,"w")
     output_predictions_file.write("Id,Category\n")
     for input_ids, input_mask, segment_ids, label_ids, guids in eval_dataloader:
@@ -702,10 +742,10 @@ def evaluate(args, model, processor, tokenizer, metadata, device):
 
         logits = logits.detach().cpu().numpy()
         label_ids = label_ids.to('cpu').numpy()
-        tmp_eval_accuracy = accuracy(logits, label_ids, custom = args.metric)
+        tmp_eval_accuracy, outputs = accuracy(logits, label_ids, custom = args.metric)
 
         for idx, _ in enumerate(input_ids):
-            text = ",".join([str(int(guids[idx].item())), id2label[label_ids[idx]]]) + "\n"
+            text = ",".join([str(int(guids[idx].item())), id2label[outputs[idx]]]) + "\n"
             output_predictions_file.write(text)
 
         eval_loss += tmp_eval_loss.mean().item()
@@ -719,16 +759,16 @@ def evaluate(args, model, processor, tokenizer, metadata, device):
 
     result = {'eval_loss': eval_loss,
               'eval_accuracy': eval_accuracy,
-              'global_step': metadata['global_step'],
-              'loss': metadata['tr_loss'] / metadata['global_nb_tr_steps']}
+              'global_step': metadata.get('global_step',0),
+              'loss': metadata.get('tr_loss',0.) / metadata.get('nb_tr_steps',1.)}
 
-
-    output_eval_file = os.path.join(args.output_dir, "eval_results_{0}.txt".format(str(global_nb_tr_steps)))
     with open(output_eval_file, "w") as writer:
         logger.info("***** Eval results *****")
         for key in sorted(result.keys()):
             logger.info("  %s = %s", key, str(result[key]))
             writer.write("%s = %s\n" % (key, str(result[key])))
+
+    if mode=="eval": torch.save(model, save_path)
 
 if __name__ == "__main__":
     main()
