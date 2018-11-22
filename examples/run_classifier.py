@@ -366,7 +366,7 @@ def accuracy(out, labels, custom = None):
 
 def wsdm_custom_metric(out, labels):
     outputs = np.argmax(out, axis=1)
-    weights = np.ones_like(labels)
+    weights = np.ones_like(labels).astype(float)
     weights[labels==0] = 1./16
     weights[labels==1] = 1./15
     weights[labels==2] = 1./5
@@ -607,6 +607,7 @@ def main():
         train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size)
 
         model.train()
+        global_nb_tr_steps = 0
         for _ in trange(int(args.num_train_epochs), desc="Epoch"):
             tr_loss = 0
             nb_tr_examples, nb_tr_steps = 0, 0
@@ -626,6 +627,7 @@ def main():
                 tr_loss += loss.item()
                 nb_tr_examples += input_ids.size(0)
                 nb_tr_steps += 1
+                global_nb_tr_steps += 1
                 if (step + 1) % args.gradient_accumulation_steps == 0:
                     if args.fp16 or args.optimize_on_cpu:
                         if args.fp16 and args.loss_scale != 1.0:
@@ -646,8 +648,8 @@ def main():
                     global_step += 1
                     metadata['global_step'] = global_step,
                     metadata['tr_loss'] = tr_loss
-                    metadata['nb_tr_steps'] = nb_tr_steps
-                    if nb_tr_steps % eval_every == 0 :
+                    metadata['global_nb_tr_steps'] = global_nb_tr_steps
+                    if nb_tr_steps % args.eval_every == 0 :
                         evaluate(args, model, processor, tokenizer, metadata, device)
 
 
@@ -679,8 +681,9 @@ def evaluate(args, model, processor, tokenizer, metadata, device):
     model.eval()
     eval_loss, eval_accuracy = 0, 0
     nb_eval_steps, nb_eval_examples = 0, 0
-    nb_tr_steps = metadata['nb_tr_steps']
-    output_predictions_path = os.path.join(args.output_dir, "eval_predictions_{0}.txt".format(str(nb_tr_steps)))
+    global_nb_tr_steps = metadata['global_nb_tr_steps']
+    output_predictions_path = os.path.join(args.output_dir, 
+                              "eval_predictions_{0}.txt".format(str(global_nb_tr_steps)))
     output_predictions_file = open(output_predictions_path,"w")
     output_predictions_file.write("Id,Category\n")
     for input_ids, input_mask, segment_ids, label_ids in eval_dataloader:
@@ -712,7 +715,7 @@ def evaluate(args, model, processor, tokenizer, metadata, device):
     result = {'eval_loss': eval_loss,
               'eval_accuracy': eval_accuracy,
               'global_step': metadata['global_step'],
-              'loss': metadata['tr_loss'] / metadata['nb_tr_steps']}
+              'loss': metadata['tr_loss'] / metadata['global_nb_tr_steps']}
 
 
     output_eval_file = os.path.join(args.output_dir, "eval_results_{0}.txt".format(str(nb_tr_steps)))
