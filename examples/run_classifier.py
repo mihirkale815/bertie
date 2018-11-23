@@ -301,10 +301,11 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
     features = []
     for (ex_index, example) in enumerate(examples):
         tokens_a = tokenizer.tokenize(example.text_a)
-
         tokens_b = None
         if example.text_b:
             tokens_b = tokenizer.tokenize(example.text_b)
+
+
 
         if tokens_b:
             # Modifies `tokens_a` and `tokens_b` in place so that the total
@@ -385,6 +386,8 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
                               segment_ids=segment_ids,
                               label_id=label_id,
                               guid=example.guid))
+
+
     return features
 
 
@@ -548,6 +551,10 @@ def main():
                         default=False,
                         action='store_true',
                         help="Whether to use 16-bit float precision instead of 32-bit")
+    parser.add_argument('--weight_loss',
+                        default=False,
+                        action='store_true',
+                        help="Whether to weight class losses")
     parser.add_argument('--loss_scale',
                         type=float, default=128,
                         help='Loss scaling, positive power of 2 values can improve fp16 convergence.')
@@ -619,6 +626,7 @@ def main():
         num_train_steps = int(
             len(train_examples) / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
 
+
     # Prepare model
     if args.model_type == 'en':
         bert_model = bert_model_en
@@ -685,6 +693,7 @@ def main():
             train_sampler = DistributedSampler(train_data)
         train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size)
 
+        weight_loss = args.weight_loss
         model.train()
         global_nb_tr_steps = 0
         for _ in trange(int(args.num_train_epochs), desc="Epoch"):
@@ -697,9 +706,9 @@ def main():
                 ch_input_ids, ch_input_mask, ch_segment_ids, ch_label_ids = batch
 
                 if args.model_type == 'ch':
-                    loss, _ = model(ch_input_ids, ch_segment_ids, ch_input_mask, ch_label_ids)
+                    loss, _ = model(ch_input_ids, ch_segment_ids, ch_input_mask, ch_label_ids, weight_loss)
                 elif args.model_type == 'en':
-                    loss, _ = model(en_input_ids, en_segment_ids, en_input_mask, en_label_ids)
+                    loss, _ = model(en_input_ids, en_segment_ids, en_input_mask, en_label_ids, weight_loss)
                 if args.model_type == 'ch-en':
                     loss, _ = model(ch_input_ids, ch_segment_ids, ch_input_mask, ch_label_ids,
                                     en_input_ids, en_segment_ids, en_input_mask, en_label_ids)
@@ -797,11 +806,12 @@ def evaluate(args, model, processor, en_tokenizer, ch_tokenizer, metadata, devic
         en_segment_ids = en_segment_ids.to(device)
         en_label_ids = en_label_ids.to(device)
 
+        weight_loss = args.weight_loss
         with torch.no_grad():
             if args.model_type == 'ch':
-                tmp_eval_loss, logits = model(ch_input_ids, ch_segment_ids, ch_input_mask, ch_label_ids)
+                tmp_eval_loss, logits = model(ch_input_ids, ch_segment_ids, ch_input_mask, ch_label_ids, weight_loss)
             elif args.model_type == 'en':
-                tmp_eval_loss, logits = model(en_input_ids, en_segment_ids, en_input_mask, en_label_ids)
+                tmp_eval_loss, logits = model(en_input_ids, en_segment_ids, en_input_mask, en_label_ids,weight_loss)
             elif args.model_type  == 'ch-en':
                 tmp_eval_loss, logits = model(ch_input_ids, ch_segment_ids, ch_input_mask, ch_label_ids,
                                               en_input_ids, en_segment_ids, en_input_mask, en_label_ids)
@@ -846,6 +856,7 @@ def create_dataset_from_examples(examples,label_list,en_tokenizer,ch_tokenizer,a
         en_examples, label_list, args.max_seq_length, en_tokenizer)
     ch_features = convert_examples_to_features(
         ch_examples, label_list, args.max_seq_length, ch_tokenizer)
+
 
 
     en_all_guids = torch.tensor([int(f.guid) for f in en_features], dtype=torch.long)
