@@ -339,11 +339,46 @@ class BertPooler(nn.Module):
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.activation = nn.Tanh()
 
-    def forward(self, hidden_states):
+    def forward(self, hidden_states, input_ids=None, token_type_ids=None):
         # We "pool" the model by simply taking the hidden state corresponding
         # to the first token.
         first_token_tensor = hidden_states[:, 0]
         pooled_output = self.dense(first_token_tensor)
+        pooled_output = self.activation(pooled_output)
+        return pooled_output
+
+class BertPoolerWordEmbeddings(nn.Module):
+    def __init__(self, config):
+        super(BertPoolerWordEmbeddings, self).__init__()
+        self.dense = nn.Linear(config.hidden_size*5, config.hidden_size)
+        self.activation = nn.Tanh()
+
+    def forward(self, hidden_states, input_ids, token_type_ids):
+        # We "pool" the model by simply taking the hidden state corresponding
+        # to the first token.
+        first_token_tensor = hidden_states[:, 0]
+        if torch.cuda.is_available():
+            s1_mask = ((token_type_ids == 0) * (input_ids != 0) * (input_ids != 101) \
+                       * (input_ids != 102)).unsqueeze(2).type(torch.cuda.FloatTensor)
+            s2_mask = ((token_type_ids == 1) * (input_ids != 0) * (input_ids != 101) \
+                       * (input_ids != 102)).unsqueeze(2).type(torch.cuda.FloatTensor)
+        else:
+            s1_mask = ((token_type_ids == 0) * (input_ids != 0) * (input_ids != 101) \
+                       * (input_ids != 102)).unsqueeze(2).type(torch.FloatTensor)
+            s2_mask = ((token_type_ids == 1) * (input_ids != 0) * (input_ids != 101) \
+                       * (input_ids != 102)).unsqueeze(2).type(torch.FloatTensor)
+
+        s1_max_pool_tensor = torch.max(hidden_states*s1_mask, dim = 1)[0]
+        s1_avg_pool_tensor = torch.mean(hidden_states*s1_mask, dim = 1)
+        s2_max_pool_tensor = torch.max(hidden_states*s2_mask, dim = 1)[0]
+        s2_avg_pool_tensor = torch.mean(hidden_states*s2_mask, dim = 1)
+
+        pooled_token_tensor = torch.cat([first_token_tensor,
+                                         s1_max_pool_tensor,
+                                         s1_avg_pool_tensor,
+                                         s2_max_pool_tensor,
+                                         s2_avg_pool_tensor], dim = -1)
+        pooled_output = self.dense(pooled_token_tensor)
         pooled_output = self.activation(pooled_output)
         return pooled_output
 
@@ -576,11 +611,14 @@ class BertModel(PreTrainedBertModel):
     all_encoder_layers, pooled_output = model(input_ids, token_type_ids, input_mask)
     ```
     """
-    def __init__(self, config):
+    def __init__(self, config, pool_word_embeddings = False):
         super(BertModel, self).__init__(config)
         self.embeddings = BertEmbeddings(config)
         self.encoder = BertEncoder(config)
-        self.pooler = BertPooler(config)
+        if pool_word_embeddings:
+            self.pooler = BertPoolerWordEmbeddings(config)
+        else:
+            self.pooler = BertPooler(config)
         self.apply(self.init_bert_weights)
 
     def forward(self, input_ids, token_type_ids=None, attention_mask=None, output_all_encoded_layers=True):
@@ -609,7 +647,7 @@ class BertModel(PreTrainedBertModel):
                                       extended_attention_mask,
                                       output_all_encoded_layers=output_all_encoded_layers)
         sequence_output = encoded_layers[-1]
-        pooled_output = self.pooler(sequence_output)
+        pooled_output = self.pooler(sequence_output, input_ids, token_type_ids)
         if not output_all_encoded_layers:
             encoded_layers = encoded_layers[-1]
         return encoded_layers, pooled_output
@@ -904,6 +942,70 @@ class BertDualForWSDMFakeNews(nn.Module):
             return logits
 
 
+
+class BertForSequenceClassificationWithPooledWordEmbeddings(PreTrainedBertModel):
+    """BERT model for classification.
+    This module is composed of the BERT model with a linear layer on top of
+    the pooled output.
+
+    Params:
+        `config`: a BertConfig class instance with the configuration to build a new model.
+        `num_labels`: the number of classes for the classifier. Default = 2.
+
+    Inputs:
+        `input_ids`: a torch.LongTensor of shape [batch_size, sequence_length]
+            with the word token indices in the vocabulary(see the tokens preprocessing logic in the scripts
+            `extract_features.py`, `run_classifier.py` and `run_squad.py`)
+        `token_type_ids`: an optional torch.LongTensor of shape [batch_size, sequence_length] with the token
+            types indices selected in [0, 1]. Type 0 corresponds to a `sentence A` and type 1 corresponds to
+            a `sentence B` token (see BERT paper for more details).
+        `attention_mask`: an optional torch.LongTensor of shape [batch_size, sequence_length] with indices
+            selected in [0, 1]. It's a mask to be used if the input sequence length is smaller than the max
+            input sequence length in the current batch. It's the mask that we typically use for attention when
+            a batch has varying length sentences.
+        `labels`: labels for the classification output: torch.LongTensor of shape [batch_size]
+            with indices selected in [0, ..., num_labels].
+
+    Outputs:
+        if `labels` is not `None`:
+            Outputs the CrossEntropy classification loss of the output with the labels.
+        if `labels` is `None`:
+            Outputs the classification logits.
+
+    Example usage:
+    ```python
+    # Already been converted into WordPiece token ids
+    input_ids = torch.LongTensor([[31, 51, 99], [15, 5, 0]])
+    input_mask = torch.LongTensor([[1, 1, 1], [1, 1, 0]])
+    token_type_ids = torch.LongTensor([[0, 0, 1], [0, 2, 0]])
+
+    config = BertConfig(vocab_size=32000, hidden_size=512,
+        num_hidden_layers=8, num_attention_heads=6, intermediate_size=1024)
+
+    num_labels = 2
+
+    model = BertForSequenceClassification(config, num_labels)
+    logits = model(input_ids, token_type_ids, input_mask)
+    ```
+    """
+    def __init__(self, config, num_labels=2):
+        super(BertForSequenceClassificationWithPooledWordEmbeddings, self).__init__(config)
+        self.bert = BertModel(config, pool_word_embeddings = True)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.classifier = nn.Linear(config.hidden_size, num_labels)
+        self.apply(self.init_bert_weights)
+
+    def forward(self, input_ids, token_type_ids=None, attention_mask=None, labels=None):
+        _, pooled_output = self.bert(input_ids, token_type_ids, attention_mask, output_all_encoded_layers=False)
+        pooled_output = self.dropout(pooled_output)
+        logits = self.classifier(pooled_output)
+
+        if labels is not None:
+            loss_fct = CrossEntropyLoss()
+            loss = loss_fct(logits, labels)
+            return loss, logits
+        else:
+            return logits
 
 class BertForQuestionAnswering(PreTrainedBertModel):
     """BERT model for Question Answering (span extraction).

@@ -31,7 +31,9 @@ from torch.utils.data import TensorDataset, DataLoader, RandomSampler, Sequentia
 from torch.utils.data.distributed import DistributedSampler
 
 from pytorch_pretrained_bert.tokenization import printable_text, convert_to_unicode, BertTokenizer
-from pytorch_pretrained_bert.modeling import BertForSequenceClassification,BertDualForWSDMFakeNews
+from pytorch_pretrained_bert.modeling import \
+    BertForSequenceClassification,BertDualForWSDMFakeNews,BertForSequenceClassificationWithPooledWordEmbeddings
+
 from pytorch_pretrained_bert.optimization import BertAdam
 
 logging.basicConfig(format = '%(asctime)s - %(levelname)s - %(name)s -   %(message)s', 
@@ -473,6 +475,10 @@ def main():
                         default=None,
                         type=str,
                         help="Saved model path")
+    parser.add_argument("--model_architecture",
+                        default="basic",
+                        type=str,
+                        help="What model architecture to use on top of BERT")
 
     ## Other parameters
     parser.add_argument("--max_seq_length",
@@ -498,7 +504,7 @@ def main():
                         type=int,
                         help="Total batch size for training.")
     parser.add_argument("--eval_batch_size",
-                        default=32,
+                        default=64,
                         type=int,
                         help="Total batch size for eval.")
     parser.add_argument("--eval_every",
@@ -615,13 +621,24 @@ def main():
 
     # Prepare model
     if args.model_type == 'en':
-        model = BertForSequenceClassification.from_pretrained(bert_model_en, len(label_list))
+        bert_model = bert_model_en
     elif args.model_type == 'ch':
-        model = BertForSequenceClassification.from_pretrained(bert_model_ch, len(label_list))
-    elif args.model_type == 'ch-en':
+        bert_model = bert_model_ch
+
+    if args.model_type == 'ch-en':
         en_model = BertForSequenceClassification.from_pretrained(bert_model_en, len(label_list))
         ch_model = BertForSequenceClassification.from_pretrained(bert_model_ch, len(label_list))
         model = BertDualForWSDMFakeNews(ch_model,en_model,len(label_list))
+    else:
+        if args.model_architecture == "basic":
+            model = BertForSequenceClassification.from_pretrained(args.bert_model, len(label_list))
+        elif args.model_architecture == "wordpooling":
+            model = BertForSequenceClassificationWithPooledWordEmbeddings.from_pretrained(
+                args.bert_model, len(label_list))
+        else:
+            raise NotImplementedError
+
+
 
     if args.fp16:
         model.half()
@@ -661,7 +678,7 @@ def main():
         logger.info("  Num steps = %d", num_train_steps)
 
         train_data = create_dataset_from_examples(train_examples, label_list, en_tokenizer, ch_tokenizer, args)
-        
+
         if args.local_rank == -1:
             train_sampler = RandomSampler(train_data)
         else:
