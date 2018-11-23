@@ -874,6 +874,37 @@ class BertForSequenceClassification(PreTrainedBertModel):
             return logits
 
 
+class BertDualForWSDMFakeNews(nn.Module):
+    def __init__(self, bert_ch, bert_en, num_labels):
+        super(BertDualForWSDMFakeNews,self).__init__()
+        self.bert_en = bert_en
+        self.bert_ch = bert_ch
+        self.dropout = nn.Dropout(bert_ch.config.hidden_dropout_prob)
+        self.classifier = nn.Linear(bert_ch.config.hidden_size+bert_en.config.hidden_size, num_labels)
+
+
+    def forward(self, ch_input_ids, ch_token_type_ids=None, ch_attention_mask=None, ch_labels=None,
+                      en_input_ids=None, en_token_type_ids=None, en_attention_mask=None, en_labels=None):
+
+        encoded_layers_en, pooled_output_en = \
+            self.bert_en.bert(en_input_ids, en_token_type_ids, en_attention_mask, output_all_encoded_layers=False)
+        encoded_layers_ch, pooled_output_ch = \
+            self.bert_ch.bert(ch_input_ids, ch_token_type_ids, ch_attention_mask, output_all_encoded_layers=False)
+        pooled_output_en = self.dropout(pooled_output_en)
+        pooled_output_ch = self.dropout(pooled_output_ch)
+        pooled_output = torch.cat([pooled_output_ch,pooled_output_en],dim=1)
+        logits = self.classifier(pooled_output)
+
+        labels = ch_labels
+        if labels is not None:
+            loss_fct = CrossEntropyLoss()
+            loss = loss_fct(logits, labels)
+            return loss, logits
+        else:
+            return logits
+
+
+
 class BertForQuestionAnswering(PreTrainedBertModel):
     """BERT model for Question Answering (span extraction).
     This module is composed of the BERT model with a linear layer on top of

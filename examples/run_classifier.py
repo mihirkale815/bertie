@@ -31,7 +31,7 @@ from torch.utils.data import TensorDataset, DataLoader, RandomSampler, Sequentia
 from torch.utils.data.distributed import DistributedSampler
 
 from pytorch_pretrained_bert.tokenization import printable_text, convert_to_unicode, BertTokenizer
-from pytorch_pretrained_bert.modeling import BertForSequenceClassification
+from pytorch_pretrained_bert.modeling import BertForSequenceClassification,BertDualForWSDMFakeNews
 from pytorch_pretrained_bert.optimization import BertAdam
 
 logging.basicConfig(format = '%(asctime)s - %(levelname)s - %(name)s -   %(message)s', 
@@ -59,6 +59,24 @@ class InputExample(object):
         self.text_a = text_a
         self.text_b = text_b
         self.label = label
+
+class WSDMFakeNewsInputExample(object):
+    """A single training/test example for simple sequence classification."""
+
+    def __init__(self, ch_example,en_example):
+        """Constructs a InputExample.
+
+        Args:
+            guid: Unique id for the example.
+            text_a: string. The untokenized text of the first sequence. For single
+            sequence tasks, only this sequence must be specified.
+            text_b: (Optional) string. The untokenized text of the second sequence.
+            Only must be specified for sequence pair tasks.
+            label: (Optional) string. The label of the example. This should be
+            specified for train and dev examples, but not for test examples.
+        """
+        self.chinese = ch_example
+        self.english = en_example
 
 
 class InputFeatures(object):
@@ -174,6 +192,18 @@ class MnliProcessor(DataProcessor):
         return examples
 
 
+def parse_wsdm_fake_news_row(row):
+    guid = "%s" % (convert_to_unicode(row[0]))
+    ch_text_a = convert_to_unicode(row[3])
+    ch_text_b = convert_to_unicode(row[4])
+    en_text_a = convert_to_unicode(row[5])
+    en_text_b = convert_to_unicode(row[6])
+    label = convert_to_unicode(row[-1])
+
+    return guid,ch_text_a,ch_text_b,en_text_a,en_text_b,label
+
+
+
 class WSDMFakeNewsProcessor(DataProcessor):
     """Processor for the WSDM 2019 Fake News Challenge data set (GLUE version)."""
 
@@ -182,8 +212,12 @@ class WSDMFakeNewsProcessor(DataProcessor):
         return self._create_examples(
             self._read_csv(os.path.join(data_dir, "train.csv")), 'train')
 
-    def get_dev_examples(self, data_dir):
+    def get_dev_examples(self, data_dir, mode = "eval"):
         """See base class."""
+        if mode=="test":
+            return self._test_create_examples(
+            self._read_csv(os.path.join(data_dir, "test.csv")),
+            "test")
         return self._create_examples(
             self._read_csv(os.path.join(data_dir, "dev.csv")),
             "dev")
@@ -196,22 +230,30 @@ class WSDMFakeNewsProcessor(DataProcessor):
         """Creates examples for the training and dev sets."""
         num_exceptions = 0
         examples = []
-        allowed_labels = set(self.get_labels())
+        for (i, line) in enumerate(lines):
+            if i == 0: continue
+            guid, ch_text_a, ch_text_b, en_text_a, en_text_b, label = parse_wsdm_fake_news_row(line)
+            example = WSDMFakeNewsInputExample(InputExample(guid=guid, text_a=ch_text_a, text_b=ch_text_b, label=label),
+                       InputExample(guid=guid, text_a=en_text_a, text_b=en_text_b, label=label))
+            examples.append(example)
+
+        return examples
+
+    def _test_create_examples(self, lines, set_type):
+        """Creates examples for the training and dev sets."""
+
+        examples = []
         for (i, line) in enumerate(lines):
             if i == 0:
                 continue
-            try:
-                guid = "%s" % (convert_to_unicode(line[0]))
-                text_a = convert_to_unicode(line[3])
-                text_b = convert_to_unicode(line[4])
-                label = convert_to_unicode(line[-1])
-                if label not in allowed_labels: print(label)
-            except Exception as e:
-                num_exceptions+=1
-            examples.append(
-                InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label))
-        print("number of exceptions while parsing file = ",num_exceptions)
+            guid, ch_text_a, ch_text_b, en_text_a, en_text_b, label = parse_wsdm_fake_news_row(line)
+            label = 'unrelated'
+            example = WSDMFakeNewsInputExample(InputExample(guid=guid, text_a=ch_text_a, text_b=ch_text_b, label=label),
+                                               InputExample(guid=guid, text_a=en_text_a, text_b=en_text_b, label=label))
+            examples.append(example)
+
         return examples
+
 
 
 class ColaProcessor(DataProcessor):
@@ -364,17 +406,17 @@ def accuracy(out, labels, custom = None):
     if custom is not None and custom =='wsdm':
         return wsdm_custom_metric(out, labels)
     outputs = np.argmax(out, axis=1)
-    return np.sum(outputs == labels)
+    return np.sum(outputs == labels) , outputs
 
 def wsdm_custom_metric(out, labels):
     outputs = np.argmax(out, axis=1)
-    weights = np.ones_like(labels)
+    weights = np.ones_like(labels).astype(float)
     weights[labels==0] = 1./16
     weights[labels==1] = 1./15
     weights[labels==2] = 1./5
     weights = weights/np.sum(weights)
     weighted_acc = (outputs == labels)*weights
-    return np.sum(weighted_acc)*len(labels)
+    return np.sum(weighted_acc)*len(labels), outputs
 
 def copy_optimizer_params_to_model(named_params_model, named_params_optimizer):
     """ Utility function for optimize_on_cpu and 16-bits training.
@@ -427,6 +469,10 @@ def main():
                         type=str,
                         required=True,
                         help="The output directory where the model checkpoints will be written.")
+    parser.add_argument("--saved_model_path",
+                        default=None,
+                        type=str,
+                        help="Saved model path")
 
     ## Other parameters
     parser.add_argument("--max_seq_length",
@@ -443,6 +489,10 @@ def main():
                         default=False,
                         action='store_true',
                         help="Whether to run eval on the dev set.")
+    parser.add_argument("--do_test",
+                        default=False,
+                        action='store_true',
+                        help="Whether to run eval on the test set.")
     parser.add_argument("--train_batch_size",
                         default=32,
                         type=int,
@@ -499,6 +549,10 @@ def main():
                         default=None,
                         type=str,
                         help="Which metric to use.")
+    parser.add_argument("--model_type",
+                        default='ch',
+                        type=str,
+                        help="en, ch or en-ch depending on which language(s) to be used")
 
     args = parser.parse_args()
 
@@ -506,7 +560,7 @@ def main():
         "cola": ColaProcessor,
         "mnli": MnliProcessor,
         "mrpc": MrpcProcessor,
-        "wsdm": WSDMFakeNewsProcessor
+        "wsdm": WSDMFakeNewsProcessor,
     }
 
     if args.local_rank == -1 or args.no_cuda:
@@ -534,10 +588,7 @@ def main():
     if n_gpu > 0:
         torch.cuda.manual_seed_all(args.seed)
 
-    if not args.do_train and not args.do_eval:
-        raise ValueError("At least one of `do_train` or `do_eval` must be True.")
-
-    if os.path.exists(args.output_dir) and os.listdir(args.output_dir):
+    if args.do_train and os.path.exists(args.output_dir) and os.listdir(args.output_dir):
         raise ValueError("Output directory ({}) already exists and is not empty.".format(args.output_dir))
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -549,7 +600,11 @@ def main():
     processor = processors[task_name]()
     label_list = processor.get_labels()
 
-    tokenizer = BertTokenizer.from_pretrained(args.bert_model)
+    bert_model_ch = 'bert-base-chinese'
+    bert_model_en = 'bert-base-uncased'
+
+    en_tokenizer = BertTokenizer.from_pretrained(bert_model_en)
+    ch_tokenizer = BertTokenizer.from_pretrained(bert_model_ch)
 
     train_examples = None
     num_train_steps = None
@@ -559,7 +614,15 @@ def main():
             len(train_examples) / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
 
     # Prepare model
-    model = BertForSequenceClassification.from_pretrained(args.bert_model, len(label_list))
+    if args.model_type == 'en':
+        model = BertForSequenceClassification.from_pretrained(bert_model_en, len(label_list))
+    elif args.model_type == 'ch':
+        model = BertForSequenceClassification.from_pretrained(bert_model_ch, len(label_list))
+    elif args.model_type == 'ch-en':
+        en_model = BertForSequenceClassification.from_pretrained(bert_model_en, len(label_list))
+        ch_model = BertForSequenceClassification.from_pretrained(bert_model_ch, len(label_list))
+        model = BertDualForWSDMFakeNews(ch_model,en_model,len(label_list))
+
     if args.fp16:
         model.half()
     model.to(device)
@@ -591,18 +654,14 @@ def main():
     metadata = {}
     global_step = 0
     if args.do_train:
-        train_features = convert_examples_to_features(
-            train_examples, label_list, args.max_seq_length, tokenizer)
+
         logger.info("***** Running training *****")
         logger.info("  Num examples = %d", len(train_examples))
         logger.info("  Batch size = %d", args.train_batch_size)
         logger.info("  Num steps = %d", num_train_steps)
-        all_guids = torch.tensor([ int(f.guid) for f in train_features], dtype=torch.long)
-        all_input_ids = torch.tensor([f.input_ids for f in train_features], dtype=torch.long)
-        all_input_mask = torch.tensor([f.input_mask for f in train_features], dtype=torch.long)
-        all_segment_ids = torch.tensor([f.segment_ids for f in train_features], dtype=torch.long)
-        all_label_ids = torch.tensor([f.label_id for f in train_features], dtype=torch.long)
-        train_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids, all_guids)
+
+        train_data = create_dataset_from_examples(train_examples, label_list, en_tokenizer, ch_tokenizer, args)
+        
         if args.local_rank == -1:
             train_sampler = RandomSampler(train_data)
         else:
@@ -616,8 +675,18 @@ def main():
             nb_tr_examples, nb_tr_steps = 0, 0
             for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
                 batch = tuple(t.to(device) for t in batch)
-                input_ids, input_mask, segment_ids, label_ids, guids = batch
-                loss, _ = model(input_ids, segment_ids, input_mask, label_ids)
+                guids, \
+                en_input_ids, en_input_mask, en_segment_ids, en_label_ids, \
+                ch_input_ids, ch_input_mask, ch_segment_ids, ch_label_ids = batch
+
+                if args.model_type == 'ch':
+                    loss, _ = model(ch_input_ids, ch_segment_ids, ch_input_mask, ch_label_ids)
+                elif args.model_type == 'en':
+                    loss, _ = model(en_input_ids, en_segment_ids, en_input_mask, en_label_ids)
+                if args.model_type == 'ch-en':
+                    loss, _ = model(ch_input_ids, ch_segment_ids, ch_input_mask, ch_label_ids,
+                                    en_input_ids, en_segment_ids, en_input_mask, en_label_ids)
+
                 if n_gpu > 1:
                     loss = loss.mean() # mean() to average on multi-gpu.
                 if args.fp16 and args.loss_scale != 1.0:
@@ -628,7 +697,7 @@ def main():
                     loss = loss / args.gradient_accumulation_steps
                 loss.backward()
                 tr_loss += loss.item()
-                nb_tr_examples += input_ids.size(0)
+                nb_tr_examples += ch_input_ids.size(0)
                 nb_tr_steps += 1
                 global_nb_tr_steps += 1
                 if (step + 1) % args.gradient_accumulation_steps == 0:
@@ -654,29 +723,38 @@ def main():
                     metadata['global_nb_tr_steps'] = global_nb_tr_steps
                     metadata['nb_tr_steps'] = nb_tr_steps
                     if nb_tr_steps % args.eval_every == 0 :
-                        evaluate(args, model, processor, tokenizer, metadata, device)
+                        evaluate(args, model, processor, en_tokenizer, ch_tokenizer, metadata, device)
+                        evaluate(args, model, processor, en_tokenizer, ch_tokenizer, metadata, device,
+                                 mode = "test")
 
 
-    if args.do_eval:
-        evaluate(args, model, processor, tokenizer,metadata,device)
+    if not args.do_train and args.do_eval:
+        model = torch.load(args.saved_model_path)
+        evaluate(args, model, processor, en_tokenizer, ch_tokenizer, metadata, device)
+
+    if not args.do_train and args.do_test:
+        model = torch.load(args.saved_model_path)
+        evaluate(args, model, processor, en_tokenizer, ch_tokenizer, metadata, device,
+                 mode = "test")
 
 
-def evaluate(args, model, processor, tokenizer, metadata, device):
+def evaluate(args, model, processor, en_tokenizer, ch_tokenizer, metadata, device, mode = "eval"):
+
+    global_nb_tr_steps = metadata.get('global_nb_tr_steps',0)
+    output_predictions_path = os.path.join(args.output_dir, 
+                              "{0}_predictions_{1}.txt".format(mode,str(global_nb_tr_steps)))
+    output_eval_file = os.path.join(args.output_dir, 
+                              "{0}_results_{1}.txt".format(mode,str(global_nb_tr_steps)))
+    save_path = os.path.join(args.output_dir,"model_{0}".format(str(global_nb_tr_steps)))
+
     label_list = processor.get_labels()
     label_map = create_label_map(label_list)
     id2label = {idx: label for label, idx in label_map.items()}
-    eval_examples = processor.get_dev_examples(args.data_dir)
-    eval_features = convert_examples_to_features(
-        eval_examples, label_list, args.max_seq_length, tokenizer)
+    eval_examples = processor.get_dev_examples(args.data_dir, mode=mode)
     logger.info("***** Running evaluation *****")
     logger.info("  Num examples = %d", len(eval_examples))
     logger.info("  Batch size = %d", args.eval_batch_size)
-    all_guids = torch.tensor([ int(f.guid) for f in eval_features], dtype=torch.long)
-    all_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
-    all_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
-    all_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
-    all_label_ids = torch.tensor([f.label_id for f in eval_features], dtype=torch.long)
-    eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids, all_guids)
+    eval_data = create_dataset_from_examples(eval_examples, label_list, en_tokenizer, ch_tokenizer, args)
     if args.local_rank == -1:
         eval_sampler = SequentialSampler(eval_data)
     else:
@@ -686,31 +764,43 @@ def evaluate(args, model, processor, tokenizer, metadata, device):
     model.eval()
     eval_loss, eval_accuracy = 0, 0
     nb_eval_steps, nb_eval_examples = 0, 0
-    global_nb_tr_steps = metadata['global_nb_tr_steps']
-    output_predictions_path = os.path.join(args.output_dir, "eval_predictions_{0}.txt".format(str(global_nb_tr_steps)))
     output_predictions_file = open(output_predictions_path,"w")
     output_predictions_file.write("Id,Category\n")
-    for input_ids, input_mask, segment_ids, label_ids, guids in eval_dataloader:
-        input_ids = input_ids.to(device)
-        input_mask = input_mask.to(device)
-        segment_ids = segment_ids.to(device)
-        label_ids = label_ids.to(device)
+    for guids, \
+        en_input_ids, en_input_mask, en_segment_ids, en_label_ids, \
+        ch_input_ids, ch_input_mask, ch_segment_ids, ch_label_ids in eval_dataloader:
+
+        ch_input_ids = ch_input_ids.to(device)
+        ch_input_mask = ch_input_mask.to(device)
+        ch_segment_ids = ch_segment_ids.to(device)
+        ch_label_ids = ch_label_ids.to(device)
+
+        en_input_ids = en_input_ids.to(device)
+        en_input_mask = en_input_mask.to(device)
+        en_segment_ids = en_segment_ids.to(device)
+        en_label_ids = en_label_ids.to(device)
 
         with torch.no_grad():
-            tmp_eval_loss, logits = model(input_ids, segment_ids, input_mask, label_ids)
+            if args.model_type == 'ch':
+                tmp_eval_loss, logits = model(ch_input_ids, ch_segment_ids, ch_input_mask, ch_label_ids)
+            elif args.model_type == 'en':
+                tmp_eval_loss, logits = model(en_input_ids, en_segment_ids, en_input_mask, en_label_ids)
+            elif args.model_type  == 'ch-en':
+                tmp_eval_loss, logits = model(ch_input_ids, ch_segment_ids, ch_input_mask, ch_label_ids,
+                                              en_input_ids, en_segment_ids, en_input_mask, en_label_ids)
 
         logits = logits.detach().cpu().numpy()
-        label_ids = label_ids.to('cpu').numpy()
-        tmp_eval_accuracy = accuracy(logits, label_ids, custom = args.metric)
+        label_ids = ch_label_ids.to('cpu').numpy()
+        tmp_eval_accuracy, outputs = accuracy(logits, label_ids, custom = args.metric)
 
-        for idx, _ in enumerate(input_ids):
-            text = ",".join([int(str(guids[idx].item)), id2label[label_ids[idx]]]) + "\n"
+        for idx, _ in enumerate(ch_input_ids):
+            text = ",".join([str(int(guids[idx].item())), id2label[outputs[idx]]]) + "\n"
             output_predictions_file.write(text)
 
         eval_loss += tmp_eval_loss.mean().item()
         eval_accuracy += tmp_eval_accuracy
 
-        nb_eval_examples += input_ids.size(0)
+        nb_eval_examples += ch_input_ids.size(0)
         nb_eval_steps += 1
 
     eval_loss = eval_loss / nb_eval_steps
@@ -718,16 +808,47 @@ def evaluate(args, model, processor, tokenizer, metadata, device):
 
     result = {'eval_loss': eval_loss,
               'eval_accuracy': eval_accuracy,
-              'global_step': metadata['global_step'],
-              'loss': metadata['tr_loss'] / metadata['nb_tr_steps']}
+              'global_step': metadata.get('global_step',0),
+              'loss': metadata.get('tr_loss',0.) / metadata.get('nb_tr_steps',1.)}
 
-
-    output_eval_file = os.path.join(args.output_dir, "eval_results_{0}.txt".format(str(global_nb_tr_steps)))
     with open(output_eval_file, "w") as writer:
         logger.info("***** Eval results *****")
         for key in sorted(result.keys()):
             logger.info("  %s = %s", key, str(result[key]))
             writer.write("%s = %s\n" % (key, str(result[key])))
+
+    if mode=="eval": torch.save(model, save_path)
+
+
+def create_dataset_from_examples(examples,label_list,en_tokenizer,ch_tokenizer,args):
+
+    en_examples = [example.english for example in examples]
+    ch_examples = [example.chinese for example in examples]
+
+    en_features = convert_examples_to_features(
+        en_examples, label_list, args.max_seq_length, en_tokenizer)
+    ch_features = convert_examples_to_features(
+        ch_examples, label_list, args.max_seq_length, ch_tokenizer)
+
+
+    en_all_guids = torch.tensor([int(f.guid) for f in en_features], dtype=torch.long)
+    en_all_input_ids = torch.tensor([f.input_ids for f in en_features], dtype=torch.long)
+    en_all_input_mask = torch.tensor([f.input_mask for f in en_features], dtype=torch.long)
+    en_all_segment_ids = torch.tensor([f.segment_ids for f in en_features], dtype=torch.long)
+    en_all_label_ids = torch.tensor([f.label_id for f in en_features], dtype=torch.long)
+
+    ch_all_guids = torch.tensor([int(f.guid) for f in ch_features], dtype=torch.long)
+    ch_all_input_ids = torch.tensor([f.input_ids for f in ch_features], dtype=torch.long)
+    ch_all_input_mask = torch.tensor([f.input_mask for f in ch_features], dtype=torch.long)
+    ch_all_segment_ids = torch.tensor([f.segment_ids for f in ch_features], dtype=torch.long)
+    ch_all_label_ids = torch.tensor([f.label_id for f in ch_features], dtype=torch.long)
+
+
+    return TensorDataset(en_all_guids,
+                               en_all_input_ids, en_all_input_mask, en_all_segment_ids, en_all_label_ids,
+                               ch_all_input_ids, ch_all_input_mask, ch_all_segment_ids, ch_all_label_ids)
+
+
 
 if __name__ == "__main__":
     main()
