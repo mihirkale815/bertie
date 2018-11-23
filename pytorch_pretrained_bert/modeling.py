@@ -899,7 +899,7 @@ class BertForSequenceClassification(PreTrainedBertModel):
         self.classifier = nn.Linear(config.hidden_size, num_labels)
         self.apply(self.init_bert_weights)
         self.device = torch.device("cuda" if torch.cuda.is_available()  else "cpu")
-        self.weight = torch.Tensor([0.2, 0.19, 0.61]).to(self.device)
+        self.weight = torch.Tensor([0.19, 0.20, 0.61]).to(self.device) #["unrelated", "agreed", "disagreed"]
 
     def forward(self, input_ids, token_type_ids=None, attention_mask=None, labels=None, weight_loss=False):
         _, pooled_output = self.bert(input_ids, token_type_ids, attention_mask, output_all_encoded_layers=False)
